@@ -1,9 +1,13 @@
 """
 Crypto Price Alert Bot
 -----------------------
-Watches coin prices on Binance and sends you a Telegram message when
-technical indicators (RSI + moving average crossover) hit levels that
-are historically considered "worth a look."
+Watches coin prices (via CoinGecko's free API) and sends you a Telegram
+message when technical indicators (RSI + moving average crossover) hit
+levels that are historically considered "worth a look."
+
+Uses CoinGecko instead of Binance because Binance blocks most cloud/
+datacenter server IPs (Railway, Render, AWS, etc.) with a 451 error,
+regardless of region. CoinGecko's public API works fine from cloud hosts.
 
 IMPORTANT: This is a decision-support tool, not financial advice.
 Signals are based on past price patterns and can be wrong. Always do
@@ -26,13 +30,21 @@ from datetime import datetime, timezone
 
 # ============ CONFIG ============
 
-# Coins to watch (Binance symbol format, e.g. BTCUSDT, ETHUSDT)
-COINS = ["BTCUSDT"]
+# Coins to watch. Use CoinGecko coin IDs (lowercase, hyphenated).
+# Find any coin's ID at https://www.coingecko.com/en/api/documentation
+# or by searching the coin on coingecko.com — the ID is in the URL.
+COINS = ["bitcoin"]
 
-# Candle timeframe: 1m, 5m, 15m, 1h, 4h, 1d
-INTERVAL = "1h"
+# Common ID reference: bitcoin, ethereum, solana, dogecoin, cardano,
+# ripple, binancecoin, tron, avalanche-2, polkadot, litecoin, chainlink
 
-# How often to check for signals (seconds). 300 = 5 minutes.
+# How many days of hourly history to pull each check (CoinGecko gives
+# hourly granularity automatically for ranges of 90 days or less)
+HISTORY_DAYS = 14
+
+# How often to check for signals (seconds). CoinGecko's free tier has
+# a rate limit (~10-30 calls/min shared across all users), so don't go
+# below 300 (5 min) especially if watching multiple coins.
 CHECK_INTERVAL_SECONDS = 300
 
 # RSI settings
@@ -50,28 +62,26 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")
 
 # ============ END CONFIG ============
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+COINGECKO_MARKET_CHART_URL = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Track last signal per coin so we don't spam the same alert every cycle
 _last_signal_sent = {}
 
 
-def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    """Fetch recent candlestick data from Binance public API (no key needed)."""
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
+def get_price_history(coin_id: str, days: int = HISTORY_DAYS) -> pd.DataFrame:
+    """Fetch recent hourly price history from CoinGecko's free public API."""
+    url = COINGECKO_MARKET_CHART_URL.format(id=coin_id)
+    params = {"vs_currency": "usd", "days": days}
+    resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
     raw = resp.json()
 
-    df = pd.DataFrame(raw, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_asset_volume", "num_trades",
-        "taker_buy_base", "taker_buy_quote", "ignore"
-    ])
+    prices = raw.get("prices", [])
+    df = pd.DataFrame(prices, columns=["timestamp_ms", "close"])
+    df["open_time"] = pd.to_datetime(df["timestamp_ms"], unit="ms")
     df["close"] = df["close"].astype(float)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    return df
+    return df[["open_time", "close"]]
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -87,8 +97,8 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
-def analyze(symbol: str) -> dict:
-    df = get_klines(symbol, INTERVAL)
+def analyze(coin_id: str) -> dict:
+    df = get_price_history(coin_id)
     df["rsi"] = compute_rsi(df["close"], RSI_PERIOD)
     df["ma_short"] = df["close"].rolling(MA_SHORT).mean()
     df["ma_long"] = df["close"].rolling(MA_LONG).mean()
@@ -111,7 +121,7 @@ def analyze(symbol: str) -> dict:
         signals.append(f"Death cross: {MA_SHORT}-MA crossed below {MA_LONG}-MA — bearish signal")
 
     return {
-        "symbol": symbol,
+        "symbol": coin_id,
         "price": latest["close"],
         "rsi": latest["rsi"],
         "signals": signals,
@@ -169,7 +179,7 @@ def run_once():
 
 def main():
     print("Crypto Alert Bot started.")
-    print(f"Watching: {COINS} on {INTERVAL} candles, checking every {CHECK_INTERVAL_SECONDS}s")
+    print(f"Watching: {COINS}, checking every {CHECK_INTERVAL_SECONDS}s")
     while True:
         run_once()
         time.sleep(CHECK_INTERVAL_SECONDS)
