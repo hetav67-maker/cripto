@@ -1,0 +1,150 @@
+"""
+New Coin Listing Watcher
+-------------------------
+Watches Binance for USDT trading pairs that did NOT exist on the previous
+check and sends a Telegram alert as soon as one appears. This is the
+"new coin" detector — bot.py and scanner.py analyze coins that are already
+trading; this script tells you the moment something new shows up.
+
+WHY THIS MATTERS (read before using):
+Freshly-listed coins are the highest-risk corner of crypto. Common patterns:
+  - Pump and dump: price spikes on listing hype, then collapses once early
+    holders sell into it.
+  - Rug pulls: especially for coins NOT listed on a major exchange like
+    Binance, where the team can vanish with liquidity-pool funds.
+  - Wash trading: fake volume to look more "active" than it is.
+A "new listing" alert is a starting point for research, never a buy signal.
+Binance's own listing process filters out a lot of outright scams (unlike
+random DEX tokens), but that does not make a coin a good investment.
+
+This is a decision-support tool, not financial advice. Never invest more
+than you can afford to lose completely.
+
+SETUP: same as bot.py (see README.md). Just run:
+    python new_coins.py
+
+On first run it only records the current set of coins as a baseline (no
+alerts, since "everything" would look new). From the second check onward,
+anything not in that baseline triggers an alert.
+"""
+
+import os
+import json
+import time
+import requests
+from datetime import datetime, timezone
+
+from bot import send_telegram_message
+
+# ============ CONFIG ============
+
+# How often to check for newly listed coins (seconds).
+CHECK_INTERVAL_SECONDS = 900  # 15 minutes
+
+# Where to persist the set of already-seen symbols between runs/restarts.
+STATE_FILE = os.environ.get("NEW_COINS_STATE_FILE", "known_symbols.json")
+
+# ============ END CONFIG ============
+
+BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+BINANCE_TICKER_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
+
+
+def get_usdt_symbols() -> set:
+    """Return all USDT pairs currently tradeable on Binance spot."""
+    resp = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=15)
+    resp.raise_for_status()
+    symbols_info = resp.json()["symbols"]
+    return {
+        s["symbol"] for s in symbols_info
+        if s["quoteAsset"] == "USDT"
+        and s["status"] == "TRADING"
+        and s["isSpotTradingAllowed"]
+    }
+
+
+def get_ticker_snapshot(symbol: str) -> dict | None:
+    """Grab a quick price/volume/change snapshot for a newly found symbol."""
+    try:
+        resp = requests.get(
+            BINANCE_TICKER_24H_URL, params={"symbol": symbol}, timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "price": float(data["lastPrice"]),
+            "volume_usd": float(data["quoteVolume"]),
+            "change_pct": float(data["priceChangePercent"]),
+        }
+    except Exception as e:
+        print(f"[WARN] Could not fetch ticker for {symbol}: {e}")
+        return None
+
+
+def load_known_symbols() -> set:
+    if not os.path.exists(STATE_FILE):
+        return set()
+    with open(STATE_FILE, "r") as f:
+        return set(json.load(f))
+
+
+def save_known_symbols(symbols: set):
+    with open(STATE_FILE, "w") as f:
+        json.dump(sorted(symbols), f)
+
+
+def format_alert(new_symbols: list) -> str:
+    lines = [f"*New Listing Alert — {len(new_symbols)} coin(s)*", ""]
+    for symbol, snap in new_symbols:
+        if snap:
+            lines.append(
+                f"• *{symbol}* — ${snap['price']:.6f} — "
+                f"24h vol ${snap['volume_usd']:,.0f} — "
+                f"{snap['change_pct']:+.1f}%"
+            )
+        else:
+            lines.append(f"• *{symbol}* — just listed, no ticker data yet")
+    lines.append("")
+    lines.append(
+        "_New listings are high risk: thin liquidity, pump-and-dump and "
+        "wash-trading patterns are common. This is not a buy signal — "
+        "research the project before doing anything._"
+    )
+    return "\n".join(lines)
+
+
+def run_check():
+    known = load_known_symbols()
+    current = get_usdt_symbols()
+
+    if not known:
+        # First run: just establish the baseline, don't alert on the
+        # entire existing market.
+        print(f"[{datetime.now(timezone.utc)}] Seeding baseline with {len(current)} symbols.")
+        save_known_symbols(current)
+        return
+
+    new_symbols = sorted(current - known)
+    if new_symbols:
+        print(f"[{datetime.now(timezone.utc)}] Found {len(new_symbols)} new listing(s): {new_symbols}")
+        results = [(s, get_ticker_snapshot(s)) for s in new_symbols]
+        send_telegram_message(format_alert(results))
+    else:
+        print(f"[{datetime.now(timezone.utc)}] No new listings.")
+
+    save_known_symbols(current)
+
+
+def main():
+    print("New Coin Listing Watcher started.")
+    print(f"Checking every {CHECK_INTERVAL_SECONDS}s | state file: {STATE_FILE}")
+    while True:
+        try:
+            run_check()
+        except Exception as e:
+            print(f"[ERROR] Check failed: {e}")
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
