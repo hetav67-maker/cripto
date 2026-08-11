@@ -56,6 +56,11 @@ RSI_OVERBOUGHT = 70    # above this = potential sell zone
 MA_SHORT = 20
 MA_LONG = 50
 
+# Binance kline interval used by scanner.py / backtest.py / new_coins.py
+# (bot.py itself uses CoinGecko and doesn't need this, but it's kept here
+# as the single shared config source so the other scripts can import it)
+INTERVAL = "1h"
+
 # Telegram credentials — fill these in or set as environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")
